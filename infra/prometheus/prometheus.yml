@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: node-microservices
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api-gateway:3000
+          - user-service:3001
+          - product-service:3002
+          - order-service:3003
+          - notification-service:3004
+  - job_name: traefik
+    static_configs:
+      - targets: ['traefik:8082']

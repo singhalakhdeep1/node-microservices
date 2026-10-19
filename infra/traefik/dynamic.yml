@@ -1,0 +1,35 @@
+# Traefik file provider: edge routing in front of the API gateway and the frontend.
+http:
+  routers:
+    api:
+      rule: "PathPrefix(`/api`) || Path(`/health`)"
+      entryPoints: [web]
+      service: api-gateway
+      middlewares: [secure-headers, compress]
+      priority: 100
+    frontend:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [web]
+      service: frontend
+      middlewares: [secure-headers, compress]
+      priority: 1
+  services:
+    api-gateway:
+      loadBalancer:
+        healthCheck:
+          path: /health
+          interval: 10s
+        servers:
+          - url: http://api-gateway:3000
+    frontend:
+      loadBalancer:
+        servers:
+          - url: http://frontend:3005
+  middlewares:
+    secure-headers:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        referrerPolicy: same-origin
+    compress:
+      compress: {}

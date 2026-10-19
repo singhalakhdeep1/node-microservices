@@ -1,0 +1,274 @@
+# Backing services. For production use managed MongoDB/RabbitMQ/Redis or their operators/Helm charts.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: microservices
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+    matchLabels: { app: mongodb }
+  template:
+    metadata:
+      labels: { app: mongodb }
+    spec:
+      containers:
+      - name: mongodb
+        image: mongo:7.0
+        ports:
+        - containerPort: 27017
+        env:
+        - name: MONGO_INITDB_ROOT_USERNAME
+          value: admin
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom: { secretKeyRef: { name: nms-secrets, key: MONGO_ROOT_PASSWORD } }
+        volumeMounts:
+        - name: data
+          mountPath: /data/db
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: microservices
+spec:
+  selector: { app: mongodb }
+  ports:
+  - name: p27017
+    port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: microservices
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels: { app: rabbitmq }
+  template:
+    metadata:
+      labels: { app: rabbitmq }
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:4.0-management
+        ports:
+        - containerPort: 5672
+        - containerPort: 15672
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: admin
+        - name: RABBITMQ_DEFAULT_PASS
+          value: password123
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/rabbitmq
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: microservices
+spec:
+  selector: { app: rabbitmq }
+  ports:
+  - name: p5672
+    port: 5672
+    targetPort: 5672
+  - name: p15672
+    port: 15672
+    targetPort: 15672
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: microservices
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.4-alpine
+        ports:
+        - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: microservices
+spec:
+  selector: { app: redis }
+  ports:
+  - name: p6379
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consul
+  namespace: microservices
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: consul }
+  template:
+    metadata:
+      labels: { app: consul }
+    spec:
+      containers:
+      - name: consul
+        image: hashicorp/consul:1.20
+        args: ["agent", "-dev", "-client=0.0.0.0"]
+        ports:
+        - containerPort: 8500
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consul
+  namespace: microservices
+spec:
+  selector: { app: consul }
+  ports:
+  - name: p8500
+    port: 8500
+    targetPort: 8500
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zipkin
+  namespace: microservices
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: zipkin }
+  template:
+    metadata:
+      labels: { app: zipkin }
+    spec:
+      containers:
+      - name: zipkin
+        image: openzipkin/zipkin:3
+        ports:
+        - containerPort: 9411
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zipkin
+  namespace: microservices
+spec:
+  selector: { app: zipkin }
+  ports:
+  - name: p9411
+    port: 9411
+    targetPort: 9411
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluentd
+  namespace: microservices
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: fluentd }
+  template:
+    metadata:
+      labels: { app: fluentd }
+    spec:
+      containers:
+      - name: fluentd
+        image: fluent/fluentd:v1.17-1
+        ports:
+        - containerPort: 24224
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluentd
+  namespace: microservices
+spec:
+  selector: { app: fluentd }
+  ports:
+  - name: p24224
+    port: 24224
+    targetPort: 24224
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: seaweedfs
+  namespace: microservices
+spec:
+  serviceName: seaweedfs
+  replicas: 1
+  selector:
+    matchLabels: { app: seaweedfs }
+  template:
+    metadata:
+      labels: { app: seaweedfs }
+    spec:
+      containers:
+      - name: seaweedfs
+        image: chrislusf/seaweedfs:3.80
+        args: ["server", "-dir=/data", "-ip=seaweedfs", "-master.port=9333", "-volume.port=8080"]
+        ports:
+        - containerPort: 9333
+        - containerPort: 8080
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs
+  namespace: microservices
+spec:
+  selector: { app: seaweedfs }
+  ports:
+  - name: p9333
+    port: 9333
+    targetPort: 9333
+  - name: p8080
+    port: 8080
+    targetPort: 8080

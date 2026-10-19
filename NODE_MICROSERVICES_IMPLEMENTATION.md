@@ -1,125 +1,55 @@
 # Node Microservices - Implementation
 
 ## Overview
-This document describes the microservices infrastructure integrations added to Node Microservices.
+This document describes the microservices infrastructure integrations in Node Microservices, where each one lives, and how it is switched on. Every integration is optional at runtime: when its environment variable is unset the service runs without it. `docker-compose.yml` and `k8s/` turn all of them on.
 
-## Technologies Added
+## Technologies
 
-### 1. Consul
-- Consul service registration
-- Service discovery
-- Health checks
-- Key-value store operations
-- Session management
-- Distributed locking
-- Service listing
-- Watch functionality
-- Configuration management
+### 1. Consul (service discovery)
+- **Code:** `services/shared/src/consul/consul.ts` (HTTP agent API client), used by `services/shared/src/service.ts` and `services/shared/src/service-discovery/service-discovery.ts`.
+- Every service registers itself on start (`<name>-<host>-<port>`) with an HTTP health check on `/health` (10s interval, deregistered after 1 minute critical) and deregisters on SIGTERM/SIGINT.
+- The API gateway and order-service read passing instances from Consul (`/v1/health/service/<name>?passing=true`) into their registry and round-robin over them.
+- Also implemented: key/value get/put/delete, sessions, and distributed locks (`acquireLock`/`releaseLock`).
+- **Enable:** `CONSUL_HOST`, `CONSUL_PORT` (8500), optional `CONSUL_TOKEN`, and `SERVICE_ADDRESS` (the address other services reach this one on).
 
-### 2. Zipkin
-- Distributed tracing setup
-- Span creation and management
-- Annotation recording
-- Binary annotations
-- Client/server send/receive
-- RPC recording
-- Context management
-- Service name recording
-- HTTP transport for spans
+### 2. Zipkin (distributed tracing)
+- **Code:** `services/shared/src/tracing/zipkin.ts`.
+- Express middleware continues incoming B3 headers or starts a trace, records a SERVER span, and returns `x-trace-id`.
+- `ServiceClient` (service-to-service HTTP) records CLIENT spans and forwards B3 headers. The gateway forwards B3 to the proxied service.
+- RabbitMQ events carry the trace context. Publishing and consuming record PRODUCER/CONSUMER spans.
+- Spans are batched every 2s to `POST <ZIPKIN_URL>/api/v2/spans` (Zipkin v2 JSON). Log lines include `traceId`.
+- **Enable:** `ZIPKIN_URL`, optional `ZIPKIN_SAMPLE_RATE` (0-1) and `ZIPKIN_SERVICE_NAME`.
 
-### 3. Fluentd
-- Fluentd logger setup
-- Event emission
-- Error logging
-- HTTP request logging
-- Database query logging
-- Custom event logging
-- Timestamp support
-- Connection management
-- Error handling
+### 3. Fluentd (log shipping)
+- **Code:** `services/shared/src/fluentd/fluentd.ts` (fluent-logger forward protocol), wired as a winston transport in `services/shared/src/logger.ts`.
+- Every log line goes to Fluentd, and so do structured `http` events (method, path, status, duration) and `error` events with stack traces.
+- Collector config: `infra/fluentd/fluent.conf`. It writes to stdout and daily files; swap the match for Elasticsearch or S3 in production.
+- **Enable:** `FLUENTD_HOST`, `FLUENTD_PORT` (24224), `FLUENTD_TAG` (prefix, e.g. `nms`).
 
-### 4. Traefik
-- Traefik API client
-- HTTP router management
-- HTTP service management
-- Middleware management
-- TCP router/service management
-- Entry point configuration
-- Health checks
-- Dashboard stats
-- CRUD operations for routing
+### 4. Traefik (edge router)
+- **Config:** `infra/traefik/dynamic.yml` (file provider). Traefik serves port 80: `/api` and `/health` go to the API gateway (with a health check), and everything else goes to the frontend. It adds secure headers and compression middlewares and exposes Prometheus metrics on :8082. In k8s it is the ingress controller (`k8s/ingress.yml`).
+- **Code:** `api-gateway/src/traefik.ts`, a Traefik API client (version, entrypoints, HTTP/TCP routers, services, middlewares). The gateway exposes the snapshot at `GET /api/gateway/edge` (admin only).
+- **Enable:** `TRAEFIK_API_URL` on the gateway (e.g. `http://traefik:8080`).
 
-### 5. SeaweedFS
-- SeaweedFS client
-- File upload (file and buffer)
-- File download
-- File deletion
-- Volume management
-- Collection management
-- File info retrieval
-- Volume lookup
-- System status monitoring
+### 5. SeaweedFS (file storage)
+- **Code:** `services/user-service/src/seaweedfs.ts` (master/volume HTTP API: assign, upload, lookup, download, delete, cluster status).
+- Used for user avatars:
+  - `POST /api/users/me/avatar` (multipart field `avatar`; PNG/JPEG/GIF/WebP up to 2 MB) stores the file in the `avatars` collection and deletes the previous one.
+  - `GET /api/users/:id/avatar` streams it back (public, cacheable).
+- **Enable:** `SEAWEEDFS_SERVER`, `SEAWEEDFS_PORT` (9333), `SEAWEEDFS_SCHEME`.
 
-## Files Created
+### Also wired
+- **Prometheus:** every service serves `/metrics` (prom-client). It exports HTTP rate and latency, circuit-breaker state, domain events and cache hit/miss. Scrape config: `infra/prometheus/prometheus.yml`.
+- **Redis:** cache-aside for users, products, product lists and categories, with invalidation on writes (`services/shared/src/cache.ts`).
 
-### Services
-- `services/user-service/consul.ts` - Consul service integration
-- `services/order-service/zipkin.ts` - Zipkin tracing integration
-- `services/product-service/fluentd.ts` - Fluentd logging integration
-- `services/notification-service/traefik.ts` - Traefik API integration
-- `services/user-service/seaweedfs.ts` - SeaweedFS storage integration
+## Packages
+All are declared in `services/shared/package.json` or the owning service's package.json: `amqplib`, `redis`, `fluent-logger`, `http-proxy-middleware`, `prom-client`, `jsonwebtoken`, `mongoose`, `multer`, `nodemailer`, `zod`. Consul, Zipkin, Traefik and SeaweedFS are reached over their HTTP APIs with `fetch`, so they need no client package.
 
-## Installation Required
+## Verification status
+Verified locally, against real processes:
+- Consul 1.20 dev agent
+- SeaweedFS 3.x
+- MongoDB 6
+- Redis
 
-Add to `package.json`:
-```json
-{
-  "dependencies": {
-    "consul": "^1.2.0",
-    "zipkin": "^0.22.0",
-    "zipkin-transport-http": "^0.22.0",
-    "fluent-logger": "^3.4.0",
-    "axios": "^1.6.0",
-    "seaweedfs-client": "^1.0.0"
-  }
-}
-```
-
-Run:
-```bash
-npm install
-```
-
-## Environment Variables
-
-```env
-# Consul
-CONSUL_HOST=localhost
-CONSUL_PORT=8500
-
-# Zipkin
-ZIPKIN_URL=http://localhost:9411
-ZIPKIN_SERVICE_NAME=user-service
-
-# Fluentd
-FLUENTD_HOST=localhost
-FLUENTD_PORT=24224
-FLUENTD_TAG=myapp
-
-# Traefik
-TRAEFIK_API_URL=http://localhost:8080
-
-# SeaweedFS
-SEAWEEEDFS_SERVER=localhost
-SEAWEEEDFS_PORT=9333
-SEAWEEEDFS_SCHEME=http
-```
-
-## Notes
-- All code is written but packages are not installed (per user request)
-- Consul requires Consul agent running
-- Zipkin requires Zipkin server
-- Fluentd requires Fluentd server
-- Traefik requires Traefik instance with API enabled
-- SeaweedFS requires SeaweedFS master and volume servers
-- All services support distributed microservices architecture
+Zipkin and Fluentd were checked against local sinks that received the spans and forward-protocol records; neither real server was run. RabbitMQ and the Docker images were not run on the development machine (see README "Verification").

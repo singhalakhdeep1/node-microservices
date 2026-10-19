@@ -8,7 +8,7 @@ This document provides comprehensive documentation for HLD/LLD patterns implemen
 ### HLD Topics (High-Level Design)
 
 #### 1. Service Discovery Pattern
-**Location:** `services/shared/service-discovery/service-discovery.js`
+**Location:** `services/shared/src/service-discovery/service-discovery.ts` (used by `api-gateway` and `order-service`; refreshed from Consul via `services/shared/src/consul/consul.ts`)
 
 **Description:** Implements service registration and discovery pattern for dynamic microservice communication.
 
@@ -16,61 +16,68 @@ This document provides comprehensive documentation for HLD/LLD patterns implemen
 - Service registration and deregistration
 - Health checking with heartbeats
 - Round-robin load balancing
+- Real HTTP health probes (a passing probe counts as a heartbeat)
+- Consul sync: instances come from Consul's passing health checks when `CONSUL_HOST` is set
+- Panic routing: if every instance is marked down, try registered ones and let the circuit breaker decide
 - Automatic cleanup of unhealthy instances
 
 **Usage Example:**
-```javascript
-const ServiceDiscovery = require('./shared/service-discovery/service-discovery');
+```typescript
+import { ServiceDiscovery, consulFromEnv } from '@nms/shared';
 
-const discovery = new ServiceDiscovery();
-
-discovery.registerService('order-service', 'order-1', 'localhost', 8001, '/health');
+const discovery = new ServiceDiscovery(consulFromEnv());
+discovery.registerService('order-service', 'order-1', 'localhost', 3003, '/health');
+discovery.start(['order-service']); // probes + Consul sync every 10s
 const instance = discovery.discoverService('order-service');
 ```
 
 #### 2. API Gateway Pattern
-**Location:** `services/shared/api-gateway/api-gateway.js`
+**Location:** `services/shared/src/api-gateway/api-gateway.ts` (run by `api-gateway/src/server.ts`)
 
 **Description:** Implements API Gateway pattern with routing, rate limiting, and authentication.
 
 **Key Features:**
-- Request routing to microservices
-- JWT authentication
-- Rate limiting per client
-- Service discovery integration
+- Request routing to microservices (segment-prefix routes with `:params`, most specific wins)
+- JWT authentication, optional admin-only routes; verified identity forwarded as `x-user-*` headers plus a shared gateway secret
+- Token-bucket rate limiting per client per route (`x-ratelimit-*`, `retry-after`)
+- Service discovery integration and a circuit breaker per downstream service
+- Streaming reverse proxy (http-proxy-middleware), Zipkin B3 header propagation
 
 **Usage Example:**
-```javascript
-const APIGateway = require('./shared/api-gateway/api-gateway');
+```typescript
+import { APIGateway } from '@nms/shared';
 
-const gateway = new APIGateway(discovery);
-gateway.addRoute('/api/orders', ['GET', 'POST'], 'order-service', true, 100);
-gateway.start(8080);
+const gateway = new APIGateway(discovery, logger);
+// path, methods, service, requiresAuth, requests/minute, adminOnly
+gateway.addRoute('/api/orders', ['GET', 'POST', 'PUT'], 'order-service', true, 120);
+gateway.addRoute('/api/products', ['POST', 'PUT', 'DELETE'], 'product-service', true, 60, true);
+gateway.mount(app);
 ```
 
 #### 3. Message Broker (Event Bus)
-**Location:** `services/shared/message-broker/message-broker.js`
+**Location:** `services/shared/src/message-broker/message-broker.ts`
 
 **Description:** Implements publish-subscribe pattern for event-driven architecture.
 
 **Key Features:**
-- Event publishing and subscription
-- Event-driven communication
-- Correlation ID tracking
+- `RabbitMQBroker`: one durable topic exchange (`microservices.events`), routing key = event type, a durable queue per consumer bound by pattern, publisher confirms, manual acks, one requeue then dead-letter exchange (`microservices.events.dlx`), automatic reconnect
+- `MessageBroker`: in-process EventEmitter bus with the same interface (used when `RABBITMQ_URL` is unset)
+- Event envelope with id, source, correlation ID and Zipkin trace context
 
 **Usage Example:**
-```javascript
-const MessageBroker = require('./shared/message-broker/message-broker');
+```typescript
+import { createBroker, Events } from '@nms/shared';
 
-const broker = new MessageBroker();
-broker.publish('OrderCreated', { orderId: '123' });
-broker.subscribe('OrderCreated', (payload) => console.log(payload));
+const broker = createBroker('order-service', logger); // RabbitMQ when RABBITMQ_URL is set
+await broker.connect();
+await broker.publish(Events.ORDER_CREATED, { orderId: '123' }, '123');
+await broker.subscribe('notification.order-events', ['order.*'], async (evt) => console.log(evt.type, evt.data));
 ```
 
 ### LLD Topics (Low-Level Design)
 
 #### 1. Circuit Breaker Pattern
-**Location:** `services/shared/circuit-breaker/circuit-breaker.js`
+**Location:** `services/shared/src/circuit-breaker/circuit-breaker.ts` (used by the gateway per service and by `ServiceClient` in `services/shared/src/http-client.ts`)
 
 **Description:** Implements circuit breaker pattern for fault tolerance.
 
@@ -81,14 +88,17 @@ broker.subscribe('OrderCreated', (payload) => console.log(payload));
 - Manual reset/trip support
 
 **Usage Example:**
-```javascript
-const CircuitBreaker = require('./shared/circuit-breaker/circuit-breaker');
+```typescript
+import { CircuitBreaker } from '@nms/shared';
 
-const circuitBreaker = new CircuitBreaker({ failureThreshold: 5 });
-const result = await circuitBreaker.execute(async () => {
-  return await externalService.call();
-});
+const circuitBreaker = new CircuitBreaker({ name: 'product-service', failureThreshold: 5 });
+const result = await circuitBreaker.execute(() => externalService.call());
 ```
+
+#### 2. Saga Pattern (create order)
+**Location:** `services/order-service/src/saga.ts`, participant endpoints in `services/product-service/src/routes/products.ts`
+
+Orchestrated saga: verify buyer (user-service) -> price items (product-service) -> persist `pending` -> reserve stock (atomic conditional decrement per item, compensated on partial failure, idempotent per order) -> `confirmed` + `order.created`. On failure the order becomes `failed` and the compensating `release` runs; cancelling an order also releases stock. Every step is recorded in `order.saga`. `Idempotency-Key` headers make retries safe.
 
 ## Architecture
 

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: microservices
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nms-config
+  namespace: microservices
+data:
+  RABBITMQ_URL: amqp://admin:password123@rabbitmq:5672
+  REDIS_URL: redis://redis:6379
+  CONSUL_HOST: consul
+  ZIPKIN_URL: http://zipkin:9411
+  FLUENTD_HOST: fluentd
+  FLUENTD_TAG: nms
+  SEAWEEDFS_SERVER: seaweedfs
+  USER_SERVICE_URL: http://user-service:3001
+  PRODUCT_SERVICE_URL: http://product-service:3002
+  ORDER_SERVICE_URL: http://order-service:3003
+  NOTIFICATION_SERVICE_URL: http://notification-service:3004
+  ADMIN_EMAILS: admin@example.com
+  NODE_ENV: production
+---
+# Replace these values (or manage them with sealed-secrets / external-secrets) before deploying.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nms-secrets
+  namespace: microservices
+type: Opaque
+stringData:
+  JWT_SECRET: change-me-jwt-secret
+  INTERNAL_API_TOKEN: change-me-internal-token
+  GATEWAY_SHARED_SECRET: change-me-gateway-secret
+  MONGO_ROOT_PASSWORD: password123

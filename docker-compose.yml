@@ -1,152 +1,160 @@
-version: '3.8'
+# Full stack: Traefik edge -> API gateway -> 4 services, with MongoDB, RabbitMQ, Redis, Consul,
+# Zipkin, Fluentd, SeaweedFS and Prometheus.   docker compose up --build   then open http://localhost
+x-service-env: &service-env
+  JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token}
+  GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET:-dev-gateway-secret}
+  ADMIN_EMAILS: ${ADMIN_EMAILS:-admin@example.com}
+  RABBITMQ_URL: amqp://admin:password123@rabbitmq:5672
+  REDIS_URL: redis://redis:6379
+  CONSUL_HOST: consul
+  ZIPKIN_URL: http://zipkin:9411
+  FLUENTD_HOST: fluentd
+  FLUENTD_TAG: nms
+  USER_SERVICE_URL: http://user-service:3001
+  PRODUCT_SERVICE_URL: http://product-service:3002
+  ORDER_SERVICE_URL: http://order-service:3003
+  NOTIFICATION_SERVICE_URL: http://notification-service:3004
 
-# CURRICULUM COVERAGE:
-# #1201-1250: Microservices Architecture - Service separation, communication
-# #1851-1900: Docker Containerization - Multi-container orchestration
-# #1901-1950: Service Discovery, Load Balancing
+x-service-deps: &service-deps
+  mongodb: { condition: service_healthy }
+  rabbitmq: { condition: service_healthy }
+  redis: { condition: service_started }
+  consul: { condition: service_started }
+  fluentd: { condition: service_started }
 
 services:
-  # MongoDB Database
   mongodb:
     image: mongo:7.0
-    container_name: microservices-mongodb
-    ports:
-      - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
       MONGO_INITDB_ROOT_PASSWORD: password123
-    volumes:
-      - mongodb_data:/data/db
-    networks:
-      - microservices-network
+    volumes: [mongodb_data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      retries: 10
 
-  # RabbitMQ Message Broker - #1251-1275: Message Queue Communication
   rabbitmq:
-    image: rabbitmq:3.12-management
-    container_name: microservices-rabbitmq
-    ports:
-      - "5672:5672" # AMQP
-      - "15672:15672" # Management UI
+    image: rabbitmq:4.0-management
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: password123
-    networks:
-      - microservices-network
+    ports: ["15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      retries: 10
 
-  # Redis Cache - #1276-1290: Distributed Caching
   redis:
-    image: redis:7-alpine
-    container_name: microservices-redis
-    ports:
-      - "6379:6379"
-    networks:
-      - microservices-network
+    image: redis:7.4-alpine
 
-  # User Service - #1201-1220: User Management Microservice
+  consul:
+    image: hashicorp/consul:1.20
+    command: agent -dev -client=0.0.0.0
+    ports: ["8500:8500"]
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    ports: ["9411:9411"]
+
+  fluentd:
+    image: fluent/fluentd:v1.17-1
+    volumes:
+      - ./infra/fluentd/fluent.conf:/fluentd/etc/fluent.conf:ro
+      - fluentd_logs:/fluentd/log
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    command: server -dir=/data -ip=seaweedfs -master.port=9333 -volume.port=8080 -volume.max=20
+    volumes: [seaweedfs_data:/data]
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    volumes: [./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+
   user-service:
-    build: ./services/user-service
-    container_name: user-service
-    ports:
-      - "3001:3001"
+    build: { context: ., dockerfile: services/user-service/Dockerfile }
     environment:
+      <<: *service-env
       PORT: 3001
+      SERVICE_ADDRESS: user-service
       MONGODB_URI: mongodb://admin:password123@mongodb:27017/users?authSource=admin
-      RABBITMQ_URL: amqp://admin:password123@rabbitmq:5672
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: microservices-jwt-secret-key
+      SEAWEEDFS_SERVER: seaweedfs
     depends_on:
-      - mongodb
-      - rabbitmq
-      - redis
-    networks:
-      - microservices-network
+      <<: *service-deps
+      seaweedfs: { condition: service_started }
     restart: unless-stopped
 
-  # Product Service - #1221-1240: Product Catalog Microservice
   product-service:
-    build: ./services/product-service
-    container_name: product-service
-    ports:
-      - "3002:3002"
+    build: { context: ., dockerfile: services/product-service/Dockerfile }
     environment:
+      <<: *service-env
       PORT: 3002
+      SERVICE_ADDRESS: product-service
       MONGODB_URI: mongodb://admin:password123@mongodb:27017/products?authSource=admin
-      RABBITMQ_URL: amqp://admin:password123@rabbitmq:5672
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      - mongodb
-      - rabbitmq
-      - redis
-    networks:
-      - microservices-network
+    depends_on: *service-deps
     restart: unless-stopped
 
-  # Order Service - #1241-1260: Order Management Microservice
   order-service:
-    build: ./services/order-service
-    container_name: order-service
-    ports:
-      - "3003:3003"
+    build: { context: ., dockerfile: services/order-service/Dockerfile }
     environment:
+      <<: *service-env
       PORT: 3003
+      SERVICE_ADDRESS: order-service
       MONGODB_URI: mongodb://admin:password123@mongodb:27017/orders?authSource=admin
-      RABBITMQ_URL: amqp://admin:password123@rabbitmq:5672
-      REDIS_URL: redis://redis:6379
-      USER_SERVICE_URL: http://user-service:3001
-      PRODUCT_SERVICE_URL: http://product-service:3002
-    depends_on:
-      - mongodb
-      - rabbitmq
-      - redis
-      - user-service
-      - product-service
-    networks:
-      - microservices-network
+    depends_on: *service-deps
     restart: unless-stopped
 
-  # Notification Service - #1261-1275: Notification/Email Microservice
   notification-service:
-    build: ./services/notification-service
-    container_name: notification-service
-    ports:
-      - "3004:3004"
+    build: { context: ., dockerfile: services/notification-service/Dockerfile }
     environment:
+      <<: *service-env
       PORT: 3004
-      RABBITMQ_URL: amqp://admin:password123@rabbitmq:5672
-      EMAIL_HOST: smtp.gmail.com
-      EMAIL_PORT: 587
-      EMAIL_USER: your-email@gmail.com
-      EMAIL_PASS: your-app-password
-    depends_on:
-      - rabbitmq
-    networks:
-      - microservices-network
+      SERVICE_ADDRESS: notification-service
+      MONGODB_URI: mongodb://admin:password123@mongodb:27017/notifications?authSource=admin
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USER: ${EMAIL_USER:-}
+      EMAIL_PASS: ${EMAIL_PASS:-}
+    depends_on: *service-deps
     restart: unless-stopped
 
-  # API Gateway - #1291-1310: API Gateway Pattern, Request Routing
   api-gateway:
-    build: ./api-gateway
-    container_name: api-gateway
-    ports:
-      - "3000:3000"
+    build: { context: ., dockerfile: api-gateway/Dockerfile }
     environment:
+      <<: *service-env
       PORT: 3000
-      USER_SERVICE_URL: http://user-service:3001
-      PRODUCT_SERVICE_URL: http://product-service:3002
-      ORDER_SERVICE_URL: http://order-service:3003
-      NOTIFICATION_SERVICE_URL: http://notification-service:3004
-    depends_on:
-      - user-service
-      - product-service
-      - order-service
-      - notification-service
-    networks:
-      - microservices-network
+      SERVICE_ADDRESS: api-gateway
+      TRAEFIK_API_URL: http://traefik:8080
+      CORS_ORIGIN: http://localhost
+    ports: ["3000:3000"]
+    depends_on: [user-service, product-service, order-service, notification-service]
     restart: unless-stopped
 
-networks:
-  microservices-network:
-    driver: bridge
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args: { NEXT_PUBLIC_API_URL: "http://localhost" }
+    depends_on: [api-gateway]
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.2
+    command:
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entryPoint=metrics
+      - --entrypoints.metrics.address=:8082
+    volumes: [./infra/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro]
+    ports: ["80:80", "8080:8080"]
+    depends_on: [api-gateway, frontend]
 
 volumes:
   mongodb_data:
+  fluentd_logs:
+  seaweedfs_data:
